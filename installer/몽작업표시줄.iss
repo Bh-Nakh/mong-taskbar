@@ -30,6 +30,8 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
+; DLL(placer.dll)은 탐색기 안에 들어 있어 닫을 수 없으므로 앱 닫기 대상에서 빼고 exe 만 닫는다. (DLL 은 아래 [Code] 에서 이름을 바꿔 비운다)
+CloseApplicationsFilter=*.exe
 RestartApplications=no
 VersionInfoVersion={#AppVersion}
 VersionInfoProductName={#AppName}
@@ -59,6 +61,7 @@ Root: HKA; Subkey: "Software\Classes\{#ProtoId}\shell\open\command"; ValueType: 
 [InstallDelete]
 ; 이름이 TaskbarGroup 이었던 옛 실행 파일이 같은 폴더에 남아 있으면 정리한다.
 Type: files; Name: "{app}\TaskbarGroup.exe"
+Type: files; Name: "{app}\hook\placer.dll.old"
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
@@ -68,7 +71,7 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags
 // 앱 build.bat 과 같은 방식으로 정지 파일을 만들어 DLL 이 스스로 빠져나가게 한 뒤 진행한다.
 procedure ReleasePlacer();
 var
-  HookDir, StopFile: String;
+  HookDir, StopFile, Dll, OldDll: String;
 begin
   HookDir := ExpandConstant('{app}\hook');
   if not DirExists(HookDir) then Exit;
@@ -76,6 +79,14 @@ begin
   SaveStringToFile(StopFile, '1', False);
   Sleep(3000);
   DeleteFile(StopFile);
+  // 정지 파일로도 DLL 이 탐색기에서 빠지지 않았을 수 있다. 사용 중인 DLL 도 이름은 바꿀 수 있으므로 옆으로 치워 새 DLL 이 그 자리에 설치되게 한다.
+  Dll := HookDir + '\placer.dll';
+  OldDll := HookDir + '\placer.dll.old';
+  if FileExists(Dll) then
+  begin
+    DeleteFile(OldDll);
+    RenameFile(Dll, OldDll);
+  end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
