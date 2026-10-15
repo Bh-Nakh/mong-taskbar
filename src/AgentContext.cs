@@ -337,8 +337,15 @@ namespace TaskbarGroup
         }
 
         /// <summary>탐색기 재시작/화면 배치 변경: 작업표시줄 위치를 다시 잡고, 그룹 아이콘을 다시 읽게 알린다.</summary>
+        // 탐색기가 다시 시작되면 트레이 아이콘이 사라질 수 있다. 아이콘을 껐다 켜서 새 탐색기에 다시 등록한다.
+        private void ReAddTrayIcon()
+        {
+            try { _tray.Visible = false; _tray.Visible = true; } catch { }
+        }
+
         private void OnTaskbarCreated()
         {
+            ReAddTrayIcon();
             if (_showHook != null) _showHook.Rehook();
             _traysAt = DateTime.MinValue;
             InvalidateLayout();
@@ -348,6 +355,7 @@ namespace TaskbarGroup
             {
                 t.Stop();
                 t.Dispose();
+                ReAddTrayIcon();   // 탐색기 트레이가 준비된 뒤 한 번 더
                 Background.RunSta(delegate { ShortcutSync.NotifyPinnedIcons(); Placement.Apply(_cfg); });
                 ScheduleArrange();
             };
