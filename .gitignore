@@ -47,3 +47,6 @@ __pycache__/
 groups.json
 knowledge.json
 hook/placement.txt
+# 로컬 전용 (업로드하지 않음)
+CHANGELOG.md
+hook/research/
