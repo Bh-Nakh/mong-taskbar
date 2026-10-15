@@ -1,0 +1,49 @@
+# 빌드 결과·실행 중 생기는 파일
+*.exe
+*.dll
+*.log
+*.zip
+*.lnk
+*.obj
+*.lib
+*.exp
+# 사용자 설정·학습 데이터 (PC마다 다름)
+groups.json
+knowledge.json
+hook/placement.txt
+hook/*.stop
+hook/*.off
+hook/pin_*.txt
+# minhook 의 원래 git 정보
+_minhook_git/
+# 등록한 프로그램에서 추출한 제3자 아이콘 캐시 (재배포 조건 불명)
+icons/cache/
+# 마이크로소프트 심볼에서 뽑은 조사 자료 (제3자 데이터)
+hook/research/explorer_*_symbols.txt
+# 사용자가 등록한 그룹의 아이콘 파일 (추출한 제3자 아이콘, PC마다 다름)
+icons/group_*.ico
+# 변경 기록·빌드 스크립트는 로컬 전용 (저장소에 올리지 않음)
+# 로컬 전용 폴더 (빌드 결과·설치 파일·도구 사본 등, 공개 저장소에 올리지 않음)
+_local/
+
+# --- 공개 저장소 보호 (공통): 로컬 전용·빌드 결과·캐시·개인 설정은 올리지 않는다 ---
+_local/
+bin/
+bin_*/
+dist/
+dist_addons/
+setup/
+build/
+.venv/
+__pycache__/
+*.pyc
+*.log
+*.old
+*.zip
+*.settings.json
+*.exe
+*.dll
+*.pdb
+groups.json
+knowledge.json
+hook/placement.txt

@@ -1,0 +1,4 @@
+# 줄바꿈 통일: 저장소에는 LF, 배치 파일만 CRLF
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf

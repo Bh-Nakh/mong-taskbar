@@ -1,0 +1,35 @@
+name: build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 저장소 가져오기
+        uses: actions/checkout@v4
+
+      - name: Inno Setup 6 설치
+        run: choco install innosetup -y --no-progress
+
+      - name: 빌드 (release.bat)
+        shell: cmd
+        run: call release.bat
+
+      - name: 설치 파일 해시 출력
+        shell: pwsh
+        run: |
+          $f = Get-ChildItem setup\*.exe | Sort-Object LastWriteTime | Select-Object -Last 1
+          Write-Host "설치 파일: $($f.Name)"
+          Get-FileHash $f.FullName -Algorithm SHA256 | Format-List
+
+      - name: 설치 파일 보관
+        uses: actions/upload-artifact@v4
+        with:
+          name: mong-taskbar-setup
+          path: setup/*.exe
+          if-no-files-found: error
