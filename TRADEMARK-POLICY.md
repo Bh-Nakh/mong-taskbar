@@ -22,4 +22,4 @@
 
 ## 문의
 
-상표 사용 허가나 이름 변경에 관한 문의는 이 저장소의 Issues(https://github.com/Bh-Nakh/m-task/issues)로 남긴다.
+상표 사용 허가나 이름 변경에 관한 문의는 이 저장소의 Issues(https://github.com/Bh-Nakh/mong-taskbar/issues)로 남긴다.
