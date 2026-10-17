@@ -13,7 +13,7 @@ namespace TaskbarGroup
     public static class GroupIcon
     {
         private static readonly int[] Sizes = { 16, 20, 24, 32, 40, 48, 64, 256 };
-        private const string StyleVersion = "v3-initial";
+        private const string StyleVersion = "v4-two-letters";
 
         /// <summary>그룹 아이콘 파일 경로를 돌려준다. 내용이 바뀌면 파일 이름(해시)이 바뀌므로
         /// Windows 아이콘 캐시에 막히지 않고 새 아이콘이 반영된다.</summary>
@@ -34,7 +34,7 @@ namespace TaskbarGroup
                     foreach (int s in Sizes)
                         frames.Add(custom != null
                             ? RenderGroup(new List<Bitmap>(), custom, s)
-                            : RenderNameButton(FirstLetter(g.Name), ColorFor(g), s));
+                            : RenderNameButton(IconLetters(g.Name), ColorFor(g), s));
                     WriteIco(path, frames);
                     foreach (Bitmap f in frames) f.Dispose();
                 }
@@ -254,14 +254,15 @@ namespace TaskbarGroup
             return Color.FromArgb(255, k(c.R), k(c.G), k(c.B));
         }
 
-        /// <summary>작은 작업표시줄 아이콘에서도 알아보도록 그룹 이름의 첫 글자 한 자만 쓴다.</summary>
-        public static string FirstLetter(string name)
+        /// <summary>작은 작업표시줄 아이콘에서도 알아보도록 그룹 이름의 앞 두 글자만 쓴다 (공백은 건너뜀).</summary>
+        public static string IconLetters(string name)
         {
-            name = (name ?? "").Trim();
+            name = (name ?? "").Replace(" ", "");
             if (name.Length == 0) return "?";
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
             System.Globalization.TextElementEnumerator te = System.Globalization.StringInfo.GetTextElementEnumerator(name);
-            te.MoveNext();
-            return te.GetTextElement().ToUpperInvariant();
+            for (int i = 0; i < 2 && te.MoveNext(); i++) sb.Append(te.GetTextElement());
+            return sb.ToString().ToUpperInvariant();
         }
 
         /// <summary>이름을 1~3줄로 나누는 후보들 (공백이 있으면 공백 기준, 없으면 글자 수 기준).</summary>

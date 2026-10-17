@@ -50,17 +50,19 @@ namespace TaskbarGroup
                 using (Brush bar = new SolidBrush(Accent))
                     gr.FillRectangle(bar, r.X, r.Y + 6, 3, r.Height - 12);
 
-            // 색 칩 + 첫 글자 (실제 그룹 아이콘과 같은 색)
+            // 색 칩 + 앞 두 글자 (실제 그룹 아이콘과 같은 색·글자)
             Rectangle chip = new Rectangle(r.X + 12, r.Y + (r.Height - 26) / 2, 26, 26);
             using (GraphicsPath p = Round(chip, 6))
             using (Brush b = new SolidBrush(GroupIcon.ColorAt(e.Index)))
                 gr.FillPath(b, p);
-            using (Font f = new Font("Segoe UI", 10f, FontStyle.Bold))
+            string letters = GroupIcon.IconLetters(g.Name);
+            using (Font f = new Font("Malgun Gothic", letters.Length > 1 ? 7.5f : 10f, FontStyle.Bold))
             using (StringFormat sf = new StringFormat())
             {
                 sf.Alignment = StringAlignment.Center;
                 sf.LineAlignment = StringAlignment.Center;
-                gr.DrawString(GroupIcon.FirstLetter(g.Name), f, Brushes.White, chip, sf);
+                sf.FormatFlags |= StringFormatFlags.NoWrap;
+                gr.DrawString(letters, f, Brushes.White, chip, sf);
             }
 
             // 항목 수 (오른쪽)
