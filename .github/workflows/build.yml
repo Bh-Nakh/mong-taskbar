@@ -1,10 +1,22 @@
 name: build
 
+# 소스가 main 에 푸시되면 빌드하고, 버전이 올라갔으면 이 저장소의 Release(v1)에 업데이트 파일과 latest.json 을 올린다.
+# 손으로 돌릴 때(workflow_dispatch) 태그를 바꾸면 시험용 Release(미리보기)에 올린다.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "올릴 Release 태그 (시험할 때만 바꾼다)"
+        default: v1
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -33,3 +45,9 @@ jobs:
           name: mong-taskbar-setup
           path: setup/*.exe
           if-no-files-found: error
+
+      - name: 새 버전이면 Release 에 올리기
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tools/mong_publish.ps1 -App mongtaskbar -VersionFile 'src/Version.cs' -VersionPattern 'Number\s*=\s*"([^"]+)"' -File 'setup/*.exe' -AssetName MongTaskbar-Setup.exe -Kind setup -Tag "${{ github.event.inputs.tag || 'v1' }}"
