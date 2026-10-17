@@ -19,9 +19,13 @@
 #include <vector>
 #include "MinHook.h"
 
-static const DWORD kStamp = 0x7a77dc0c;     // explorer.exe 10.0.19041.7725
-static const DWORD kSize = 0x5c9000;
+static const DWORD kStamp = 0x7a77dc0c;     // explorer.exe 10.0.19041.7725 (이 빌드면 아래 RVA 를 그대로 쓴다)
 static const DWORD kRvaCreateTBGroup = 0x5CA24;
+// 다른 빌드에서는 함수 앞부분 32바이트로 .text 를 찾는다 (19041.7725·7802 에서 한 곳만 맞음 확인).
+// 마지막 7바이트는 버튼 목록 위치(kWndDpaOffset=0xd8)를 쓰는 명령이라, 그 구조가 바뀌면 패턴이 안 맞아 배치를 하지 않는다.
+static const BYTE kSigCreateTBGroup[] = {
+    0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x68, 0x18, 0x48, 0x89, 0x70, 0x20, 0x57,
+    0x48, 0x83, 0xec, 0x30, 0x48, 0x83, 0x60, 0x08, 0x00, 0x48, 0x8d, 0x99, 0xd8, 0x00, 0x00, 0x00 };
 static const int kAppIdSlot = 19;           // ITaskGroup::GetAppID
 static const int kExeSlot = 16;             // ITaskGroup::GetExeName
 static const int kWndDpaOffset = 0xd8;      // CTaskListWnd 안의 버튼 목록(DPA)
@@ -325,6 +329,29 @@ static void ProcessPinRequest()
 
 static HMODULE g_self;
 
+// 배치할 함수 주소. 빌드가 같으면 고정 RVA, 다르면 .text 에서 패턴이 정확히 한 곳만 맞을 때 그 주소. 못 찾으면 NULL.
+static BYTE* FindCreateTBGroup(BYTE* base, IMAGE_NT_HEADERS* nt)
+{
+    if (nt->FileHeader.TimeDateStamp == kStamp) return base + kRvaCreateTBGroup;
+    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+        if (memcmp(sec->Name, ".text", 6) != 0) continue;
+        BYTE* p = base + sec->VirtualAddress;
+        size_t n = sec->Misc.VirtualSize;
+        BYTE* found = NULL;
+        int hits = 0;
+        for (size_t k = 0; k + sizeof(kSigCreateTBGroup) <= n; k++) {
+            if (p[k] != kSigCreateTBGroup[0] || memcmp(p + k, kSigCreateTBGroup, sizeof(kSigCreateTBGroup)) != 0) continue;
+            found = p + k;
+            if (++hits > 1) break;
+        }
+        Log("패턴 검색: %d곳 일치%s", hits, hits == 1 ? "" : " (한 곳이 아니라서 배치하지 않음)");
+        return hits == 1 ? found : NULL;
+    }
+    Log(".text 섹션을 못 찾음");
+    return NULL;
+}
+
 // 후킹을 걸고 요청을 처리하다가, 종료 요청(placer.stop)이 오면 후킹을 풀고 스스로 DLL 을 내린다.
 static DWORD WINAPI Worker(LPVOID)
 {
@@ -335,12 +362,14 @@ static DWORD WINAPI Worker(LPVOID)
     BYTE* base = (BYTE*)GetModuleHandleW(NULL);
     IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
     bool hooked = false;
-    if (nt->FileHeader.TimeDateStamp != kStamp || nt->OptionalHeader.SizeOfImage != kSize) {
-        Log("explorer 빌드가 달라 배치는 하지 않음 (stamp=%x size=%x)", nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
+    BYTE* target = FindCreateTBGroup(base, nt);
+    if (!target) {
+        Log("배치 함수를 찾지 못해 배치는 하지 않음 (stamp=%x size=%x)", nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
     } else {
+        Log("배치 함수 rva=%x (stamp=%x)", (unsigned)(target - base), nt->FileHeader.TimeDateStamp);
         g_modBase = base;
         MH_STATUS st = MH_Initialize();
-        if (st == MH_OK) st = MH_CreateHook(base + kRvaCreateTBGroup, (LPVOID)HookCreateTBGroup, (LPVOID*)&g_orig);
+        if (st == MH_OK) st = MH_CreateHook(target, (LPVOID)HookCreateTBGroup, (LPVOID*)&g_orig);
         if (st == MH_OK) st = MH_EnableHook(MH_ALL_HOOKS);
         hooked = (st == MH_OK);
         Log("배치 시작 status=%d", (int)st);
