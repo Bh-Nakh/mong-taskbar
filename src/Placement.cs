@@ -36,6 +36,77 @@ namespace TaskbarGroup
 
         public static bool Available { get { return File.Exists(DllPath) && Environment.Is64BitProcess; } }
 
+        // ---------- 버튼별 창 ----------
+
+        private static readonly object _btnLock = new object();
+        private static DateTime _attachFailedAt = DateTime.MinValue;
+
+        /// <summary>DLL 에게 주 작업표시줄 버튼마다 앱 ID·창 핸들을 물어 buttons 에 채운다.
+        /// 버튼 이름("Python" 등)이 같아도 창 → 프로세스로 어느 항목의 버튼인지 알 수 있게 된다.
+        /// DLL 이 없거나 답이 UIA 목록과 맞지 않으면 아무것도 채우지 않고 false (이름으로 판단하는 기존 방식).</summary>
+        public static bool AttachWindows(Config cfg, List<TaskbarButton> buttons)
+        {
+            foreach (TaskbarButton b in buttons) { b.AppId = null; b.Windows = null; }
+            if (cfg == null || !cfg.InstantPlacement || buttons.Count == 0 || !Available) return false;
+            // 답이 없던 직후에는 매번 기다리지 않는다
+            if ((DateTime.Now - _attachFailedAt).TotalSeconds < 60) return false;
+            IntPtr list = TaskbarUia.TaskListHwnd(TaskbarUia.TrayHwnd());
+            if (list == IntPtr.Zero) return false;
+
+            string req = Path.Combine(HookDir, "buttons_request.txt");
+            string res = Path.Combine(HookDir, "buttons.txt");
+            string[] lines = null;
+            lock (_btnLock)
+            {
+                try
+                {
+                    if (File.Exists(res)) File.Delete(res);
+                    File.WriteAllText(req, list.ToInt64().ToString("x"));
+                }
+                catch { return false; }
+                Stopwatch sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < 800)
+                {
+                    System.Threading.Thread.Sleep(30);
+                    if (!File.Exists(res)) continue;
+                    try { lines = File.ReadAllLines(res, Encoding.UTF8); break; }
+                    catch { }
+                }
+            }
+            if (lines == null || lines.Length == 0)
+            {
+                _attachFailedAt = DateTime.Now;
+                try { File.Delete(req); } catch { }
+                Log.Write("버튼별 창 정보를 받지 못함 (이름으로 판단)");
+                return false;
+            }
+
+            string[] head = lines[0].Split(' ');
+            int count;
+            if (head.Length < 3 || head[0] != "LIST" || head[1] != list.ToInt64().ToString("x") ||
+                !int.TryParse(head[2], out count) || count != buttons.Count || lines.Length < count + 1)
+                return false;
+
+            string[] appIds = new string[count];
+            List<IntPtr>[] wins = new List<IntPtr>[count];
+            for (int i = 0; i < count; i++)
+            {
+                string[] f = lines[i + 1].Split('|');
+                if (f.Length < 4) return false;
+                appIds[i] = f[1];
+                wins[i] = new List<IntPtr>();
+                foreach (string h in f[3].Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    long v;
+                    if (long.TryParse(h, System.Globalization.NumberStyles.HexNumber, null, out v)) wins[i].Add(new IntPtr(v));
+                }
+                // 같은 순서의 버튼인지: 창이 있는 버튼 = UIA 에서 실행 중인 버튼
+                if ((wins[i].Count > 0) != buttons[i].Running) return false;
+            }
+            for (int i = 0; i < count; i++) { buttons[i].AppId = appIds[i]; buttons[i].Windows = wins[i]; }
+            return true;
+        }
+
         // ---------- 배치 표 ----------
 
         /// <summary>그룹·항목 순서와 항목별 식별 키(실행 파일 경로, 앱 ID)를 DLL 이 읽을 파일로 쓴다.
@@ -50,8 +121,8 @@ namespace TaskbarGroup
                 sb.Append("G ").Append(g.Id).Append('\n');
                 foreach (Entry e in g.Entries)
                 {
-                    List<string> keys = KeysFor(e);
-                    sb.Append("E ").Append(string.Join("|", keys.ToArray())).Append('\n');
+                    foreach (List<string> keys in KeyLinesFor(e))
+                        sb.Append("E ").Append(string.Join("|", keys.ToArray())).Append('\n');
                 }
             }
             string text = sb.ToString();
@@ -75,7 +146,27 @@ namespace TaskbarGroup
             if (!keys.Contains(k)) keys.Add(k);
         }
 
-        private static List<string> KeysFor(Entry e)
+        /// <summary>항목 하나의 "E" 줄들. 본체 창 줄 다음에, 하위 창(같은 항목이 띄운 다른 앱 ID)이 있으면 그 줄을 하나 더 쓴다
+        /// (DLL 이 줄 순서대로 놓으므로 본체 버튼이 앞에 온다).</summary>
+        private static List<List<string>> KeyLinesFor(Entry e)
+        {
+            string ek = Arranger.EntryKey(e);
+            List<string> main = Knowledge.AppIdsOf(ek, true);
+            List<string> sub = Knowledge.AppIdsOf(ek, false);
+            List<string> keys = KeysFor(e, main.Count + sub.Count > 0);
+            foreach (string a in main) AddKey(keys, a);
+            List<List<string>> lines = new List<List<string>>();
+            lines.Add(keys);
+            if (sub.Count > 0)
+            {
+                List<string> subKeys = new List<string>();
+                foreach (string a in sub) AddKey(subKeys, a);
+                lines.Add(subKeys);
+            }
+            return lines;
+        }
+
+        private static List<string> KeysFor(Entry e, bool knowAppIds)
         {
             List<string> keys = new List<string>();
             string target = e.Target ?? "";
@@ -92,9 +183,12 @@ namespace TaskbarGroup
                 }
                 ProcessScan.EntryHint hint = ProcessScan.Resolve(e);
                 if (!hint.IsScript) AddKey(keys, hint.ExePath);
-                // 스크립트/실행기가 실제로 띄운 것으로 확인된 프로세스의 실행 파일
-                foreach (string exe in Knowledge.LaunchedExes(Arranger.EntryKey(e)))
-                    if (ProcessScan.ExeAllowed(hint, exe)) AddKey(keys, exe);
+                // 스크립트/실행기가 실제로 띄운 것으로 확인된 프로세스의 실행 파일.
+                // 스크립트가 띄운 것은 보통 pythonw.exe 같은 공용 실행기라서, 앱 ID 를 알게 되면 쓰지 않는다
+                // (안 그러면 관계없는 다른 파이썬 앱도 이 자리에 붙는다)
+                if (!(hint.IsScript && knowAppIds))
+                    foreach (string exe in Knowledge.LaunchedExes(Arranger.EntryKey(e)))
+                        if (ProcessScan.ExeAllowed(hint, exe)) AddKey(keys, exe);
             }
             catch { }
             return keys;

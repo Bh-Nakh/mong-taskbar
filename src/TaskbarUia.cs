@@ -14,6 +14,9 @@ namespace TaskbarGroup
         public string BaseName;
         public bool Running;
         public Rectangle Rect;
+        /// <summary>즉시 배치 DLL 이 알려 준 앱 ID 와 이 버튼의 창들. 못 받았으면 null.</summary>
+        public string AppId;
+        public List<IntPtr> Windows;
 
         public Point Center
         {

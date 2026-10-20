@@ -104,6 +104,7 @@ namespace TaskbarGroup
                 List<TaskbarButton> buttons = TaskbarUia.GetButtons();
                 if (buttons.Count == 0) return;
                 if (!OnScreen(buttons[0].Rect)) return;   // 자동 숨김 상태 등
+                Placement.AttachWindows(cfg, buttons);
 
                 int from, to;
                 string movedName;
@@ -121,6 +122,7 @@ namespace TaskbarGroup
                 groupNames.Clear();
                 foreach (KeyValuePair<string, string> kv in pinned) groupNames.Add(kv.Key);
                 buttons = TaskbarUia.GetButtons();
+                Placement.AttachWindows(cfg, buttons);
                 string again;
                 procs = ProcessRegistry.Snapshot();
                 if (!FindNextMove(cfg, pinned, groupNames, buttons, procs, out from, out to, out again)) return;
@@ -187,39 +189,123 @@ namespace TaskbarGroup
                 List<Entry> all = new List<Entry>();
                 foreach (KeyValuePair<int, Group> kv in placed) all.AddRange(kv.Value.Entries);
                 int last = placed[placed.Count - 1].Key;
-                return PlaceAfter(last, all, buttons, procs, groupNames, claimed, out from, out to, out name);
+                int[] rankAll;
+                Entry[] ownerAll = OwnersOf(all, buttons, procs, out rankAll);
+                return PlaceAfter(last, all, buttons, procs, groupNames, claimed, ownerAll, rankAll, out from, out to, out name);
             }
 
             // 각 그룹 아이콘 바로 오른쪽 (설정의 그룹 순서대로 처리)
+            List<Entry> ordered = new List<Entry>();
+            foreach (KeyValuePair<int, Group> kv in placed) ordered.AddRange(kv.Value.Entries);
+            int[] rank;
+            Entry[] owner = OwnersOf(ordered, buttons, procs, out rank);
             foreach (KeyValuePair<int, Group> kv in placed)
             {
-                if (PlaceAfter(kv.Key, kv.Value.Entries, buttons, procs, groupNames, claimed, out from, out to, out name))
+                if (PlaceAfter(kv.Key, kv.Value.Entries, buttons, procs, groupNames, claimed, owner, rank, out from, out to, out name))
                     return true;
+            }
+            return false;
+        }
+
+        /// <summary>버튼마다 그 창을 띄운 항목(entries 순서로 먼저 맞는 것)과, 그 항목의 본체 창이면 0 아니면 1.
+        /// 버튼별 창 정보를 못 받았으면 null (이름으로 판단).</summary>
+        private static Entry[] OwnersOf(List<Entry> entries, List<TaskbarButton> buttons, List<RunningProcess> procs, out int[] rank)
+        {
+            rank = null;
+            if (buttons.Count == 0 || buttons[0].Windows == null) return null;
+            Dictionary<int, RunningProcess> byPid = new Dictionary<int, RunningProcess>();
+            foreach (RunningProcess p in procs) byPid[p.Pid] = p;
+
+            Entry[] owner = new Entry[buttons.Count];
+            rank = new int[buttons.Count];
+            for (int i = 0; i < buttons.Count; i++)
+            {
+                rank[i] = 1;
+                List<RunningProcess> ps = new List<RunningProcess>();
+                foreach (IntPtr h in buttons[i].Windows)
+                {
+                    int pid = ProcessScan.PidOf(h);
+                    if (pid == 0) continue;
+                    RunningProcess rp;
+                    if (!byPid.TryGetValue(pid, out rp)) { rp = ProcessScan.Inspect(pid); byPid[pid] = rp; }
+                    if (!ps.Contains(rp)) ps.Add(rp);
+                }
+                if (ps.Count == 0) continue;
+                Entry e;
+                bool main;
+                if (!FindOwner(entries, ps, out e, out main)) continue;
+                owner[i] = e;
+                rank[i] = main ? 0 : 1;
+                string appId = buttons[i].AppId;
+                if (!string.IsNullOrEmpty(appId) && appId.IndexOf('\\') < 0 && !appId.StartsWith("taskbargroup.", StringComparison.OrdinalIgnoreCase))
+                    Knowledge.RecordAppId(EntryKey(e), appId, main);
+            }
+            return owner;
+        }
+
+        /// <summary>프로세스들 중 하나라도 띄운 것으로 보이는 첫 항목. 실행 파일·폴더로 먼저 찾고, 없으면 실행기 폴더로.</summary>
+        private static bool FindOwner(List<Entry> entries, List<RunningProcess> ps, out Entry owner, out bool main)
+        {
+            owner = null; main = false;
+            for (int pass = 0; pass < 2; pass++)
+            {
+                foreach (Entry e in entries)
+                {
+                    ProcessScan.EntryHint hint = HintFor(e);
+                    if (pass == 1 && hint.IsScript) continue;
+                    foreach (RunningProcess p in ps)
+                    {
+                        if (!Launches(e, hint, p, pass == 1)) continue;
+                        owner = e;
+                        // 스크립트 항목은 항목 폴더에서 바로 도는 프로세스가 본체 (하위 폴더의 도구는 그 뒤)
+                        main = !hint.IsScript || string.Equals((p.CurrentDirectory ?? "").TrimEnd('\\'), hint.Folder, StringComparison.OrdinalIgnoreCase);
+                        return true;
+                    }
+                }
             }
             return false;
         }
 
         /// <summary>anchor 버튼 바로 뒤부터 entries 순서대로 실행 중인 앱 버튼이 오도록, 옮겨야 할 첫 버튼을 찾는다.</summary>
         private static bool PlaceAfter(int anchor, List<Entry> entries, List<TaskbarButton> buttons,
-            List<RunningProcess> procs, HashSet<string> groupNames, bool[] claimed,
+            List<RunningProcess> procs, HashSet<string> groupNames, bool[] claimed, Entry[] owner, int[] rank,
             out int from, out int to, out string name)
         {
             from = -1; to = -1; name = null;
             int pos = anchor + 1;
             foreach (Entry e in entries)
             {
-                int procCount;
-                HashSet<string> names = NamesFor(e, procs, out procCount);
-                // 한 항목이 창을 여러 개 띄우면(예: 클리버스 스튜디오 + 하위 도구) 버튼이 같은 이름("Python")으로
-                // 여러 개 생기므로, 띄운 프로세스 수만큼 모두 모은다. 이름만 같은 다른 앱까지 끌고 오지 않게 그 수로 제한.
-                int limit = Math.Max(1, procCount);
                 List<int> found = new List<int>();
-                for (int i = 0; i < buttons.Count && found.Count < limit; i++)
+                if (owner != null)
                 {
-                    TaskbarButton b = buttons[i];
-                    if (claimed[i] || !b.Running) continue;
-                    if (groupNames.Contains(b.BaseName)) continue;
-                    if (names.Contains(b.BaseName)) found.Add(i);
+                    // 버튼별 창을 알 때: 그 창을 띄운 항목이 이 항목인 버튼. 창으로 주인을 못 찾은 버튼만
+                    // 항목 이름·실행 파일 이름으로 판단한다 (프로세스 이름 "Python" 같은 것은 쓰지 않음)
+                    HashSet<string> statics = CandidateNames(e);
+                    for (int i = 0; i < buttons.Count; i++)
+                    {
+                        TaskbarButton b = buttons[i];
+                        if (claimed[i] || !b.Running) continue;
+                        if (groupNames.Contains(b.BaseName)) continue;
+                        if (owner[i] == e || (owner[i] == null && statics.Contains(b.BaseName))) found.Add(i);
+                    }
+                    // 본체 창의 버튼을 먼저, 나머지는 지금 순서대로
+                    int[] rk = rank;
+                    found.Sort(delegate (int a, int b) { return rk[a] != rk[b] ? rk[a].CompareTo(rk[b]) : a.CompareTo(b); });
+                }
+                else
+                {
+                    int procCount;
+                    HashSet<string> names = NamesFor(e, procs, out procCount);
+                    // 한 항목이 창을 여러 개 띄우면(예: 클리버스 스튜디오 + 하위 도구) 버튼이 같은 이름("Python")으로
+                    // 여러 개 생기므로, 띄운 프로세스 수만큼 모두 모은다. 이름만 같은 다른 앱까지 끌고 오지 않게 그 수로 제한.
+                    int limit = Math.Max(1, procCount);
+                    for (int i = 0; i < buttons.Count && found.Count < limit; i++)
+                    {
+                        TaskbarButton b = buttons[i];
+                        if (claimed[i] || !b.Running) continue;
+                        if (groupNames.Contains(b.BaseName)) continue;
+                        if (names.Contains(b.BaseName)) found.Add(i);
+                    }
                 }
                 foreach (int i in found) claimed[i] = true;
                 foreach (int idx in found)

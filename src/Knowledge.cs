@@ -36,6 +36,9 @@ namespace TaskbarGroup
         /// <summary>항목 → 그 항목이 실제로 띄운 것으로 확인된 프로세스 ("실행 파일|명령줄").
         /// 예: CapCutAutomator.exe → "pythonw.exe|... capcut_ui.py"</summary>
         public Dictionary<string, List<string>> Launched { get; set; }
+        /// <summary>항목 → 그 항목이 띄운 창의 작업표시줄 앱 ID ("1|앱ID" = 본체 창, "0|앱ID" = 하위 창).
+        /// 예: 클리버스 스튜디오 → "1|CleverseStudio...", "0|CleverseStudio.SubtitleMaker"</summary>
+        public Dictionary<string, List<string>> AppIds { get; set; }
 
         public KnowledgeData()
         {
@@ -43,6 +46,7 @@ namespace TaskbarGroup
             Exes = new Dictionary<string, ExeRec>();
             Dirs = new Dictionary<string, bool>();
             Launched = new Dictionary<string, List<string>>();
+            AppIds = new Dictionary<string, List<string>>();
         }
     }
 
@@ -86,6 +90,7 @@ namespace TaskbarGroup
                     _d.Exes = new Dictionary<string, ExeRec>(_d.Exes ?? new Dictionary<string, ExeRec>(), StringComparer.OrdinalIgnoreCase);
                     _d.Dirs = new Dictionary<string, bool>(_d.Dirs ?? new Dictionary<string, bool>(), StringComparer.OrdinalIgnoreCase);
                     _d.Launched = new Dictionary<string, List<string>>(_d.Launched ?? new Dictionary<string, List<string>>(), StringComparer.OrdinalIgnoreCase);
+                    _d.AppIds = new Dictionary<string, List<string>>(_d.AppIds ?? new Dictionary<string, List<string>>(), StringComparer.OrdinalIgnoreCase);
                 }
                 return _d;
             }
@@ -273,6 +278,41 @@ namespace TaskbarGroup
                 foreach (string s in list) if (string.Equals(s, sig, StringComparison.OrdinalIgnoreCase)) return true;
             }
             return false;
+        }
+
+        // ---------- 항목의 작업표시줄 앱 ID ----------
+
+        public static void RecordAppId(string entryKey, string appId, bool main)
+        {
+            string rec = (main ? "1|" : "0|") + appId;
+            lock (_lock)
+            {
+                List<string> list;
+                if (!D.AppIds.TryGetValue(entryKey, out list)) { list = new List<string>(); D.AppIds[entryKey] = list; }
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (!string.Equals(list[i].Substring(2), appId, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (string.Equals(list[i], rec, StringComparison.OrdinalIgnoreCase)) return;
+                    list.RemoveAt(i);     // 본체/하위가 바뀌었으면 새로 기록
+                    break;
+                }
+                list.Add(rec);
+                _dirty = true;
+            }
+        }
+
+        /// <summary>이 항목의 앱 ID 들. main 이 true 면 본체 창의 것만, false 면 하위 창의 것만.</summary>
+        public static List<string> AppIdsOf(string entryKey, bool main)
+        {
+            List<string> res = new List<string>();
+            lock (_lock)
+            {
+                List<string> list;
+                if (!D.AppIds.TryGetValue(entryKey, out list)) return res;
+                foreach (string s in list)
+                    if (s.Length > 2 && (s[0] == '1') == main) res.Add(s.Substring(2));
+            }
+            return res;
         }
 
         // ---------- 저장 / 초기화 ----------

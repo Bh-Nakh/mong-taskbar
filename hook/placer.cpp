@@ -10,10 +10,14 @@
 // 종료: 같은 폴더에 placer.stop 파일이 생기면 후킹을 풀고 스스로 explorer 에서 내려간다.
 // 고정/해제 요청: pin_request.txt 에 "PIN|바로가기경로" 또는 "UNPIN|고정폴더안바로가기경로" 한 줄 →
 //   explorer 안에서 IPinnedList3::Modify 를 부르고 결과를 pin_result.txt ("hr=0x...") 에 쓴다.
+// 버튼 목록 요청: buttons_request.txt 에 버튼 목록 창(MSTaskListWClass) 핸들(16진수) →
+//   작업표시줄 UI 스레드에서 버튼마다 앱 ID·실행 파일·창 핸들을 읽어 buttons.txt 에 쓴다.
+//   (버튼 이름만으로는 "Python" 처럼 같은 이름의 버튼을 구분할 수 없어서, 도우미가 창 → 프로세스로 잇는다)
 #include <windows.h>
 #include <objbase.h>
 #include <shlobj.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <string>
 #include <vector>
@@ -30,11 +34,24 @@ static const int kAppIdSlot = 19;           // ITaskGroup::GetAppID
 static const int kExeSlot = 16;             // ITaskGroup::GetExeName
 static const int kWndDpaOffset = 0xd8;      // CTaskListWnd 안의 버튼 목록(DPA)
 static const int kBtnGroupTgOffset = 32;    // CTaskBtnGroup 안의 CTaskGroup 포인터
+// CTaskGroup::GetItemFromWindow 의 앞부분(+0x1c 부터 0x60 바이트). 그룹의 창 목록 DPA 가 [CTaskGroup+0x20],
+// 항목의 창 핸들을 돌려주는 함수가 vtable 12번째(+0x60)임을 이 코드에서 확인했다 (19041.7725·7802).
+// 이 바이트가 .text 에 정확히 한 곳 있을 때만 버튼 목록을 내보낸다.
+static const BYTE kSigGetItemFromWindow[] = {
+    0x49, 0x83, 0x20, 0x00, 0x4d, 0x8b, 0xf8, 0x48, 0x8b, 0x41, 0x20, 0x4c, 0x8b, 0xea, 0x48, 0x8b,
+    0xf1, 0xbd, 0x05, 0x40, 0x00, 0x80, 0x48, 0x85, 0xc0, 0x74, 0x08, 0x4c, 0x63, 0x30, 0x4d, 0x85,
+    0xf6, 0x7f, 0x20, 0x48, 0x8b, 0x5c, 0x24, 0x50, 0x8b, 0xc5, 0x48, 0x8b, 0x6c, 0x24, 0x58, 0x48,
+    0x8b, 0x74, 0x24, 0x60, 0x48, 0x83, 0xc4, 0x20, 0x41, 0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c,
+    0x5f, 0xc3, 0xcc, 0x33, 0xdb, 0x48, 0x8b, 0x46, 0x20, 0x48, 0x8b, 0x48, 0x08, 0x48, 0x8b, 0x3c,
+    0xd9, 0x48, 0x85, 0xff, 0x74, 0x37, 0x48, 0x8b, 0x07, 0x48, 0x8b, 0xcf, 0x48, 0x8b, 0x40, 0x60 };
+static const int kTgItemsOffset = 0x20;     // CTaskGroup 안의 창 항목 목록(DPA)
+static const int kItemWindowSlot = 12;      // ITaskItem::GetWindow
 
 typedef unsigned long long u64;
 typedef u64(__fastcall* Fn8)(u64, u64, u64, u64, u64, u64, u64, u64);
 static Fn8 g_orig;
 static const BYTE* g_modBase;
+static HMODULE g_self;
 static wchar_t g_dir[MAX_PATH];
 static CRITICAL_SECTION g_cs;
 static LONG g_lines;
@@ -75,6 +92,25 @@ static bool CallStr(void* obj, int slot, wchar_t* out, int cap)
         out[i] = 0;
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { out[0] = 0; return false; }
+}
+
+static DWORD g_modSize;
+static bool InImage(const void* p)
+{
+    return g_modBase && (const BYTE*)p >= g_modBase && (const BYTE*)p < g_modBase + g_modSize;
+}
+
+// vtable 의 함수가 explorer 안을 가리킬 때만 부른다 (해제된 개체를 잘못 부르지 않도록)
+typedef u64(__fastcall* PtrFn)(void*);
+static bool CallPtr(void* obj, int slot, u64& out)
+{
+    out = 0;
+    __try {
+        void** vt = *(void***)obj;
+        if (!InImage(vt) || !InImage(vt[slot])) return false;
+        out = ((PtrFn)vt[slot])(obj);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
 static std::wstring Lower(const wchar_t* s)
@@ -250,7 +286,7 @@ static int ComputeIndex(void* wnd, void* newTg)
             const GroupRec& G = g_groups[order[o]];
             for (size_t e = 0; e < G.entries.size(); e++) {
                 if (order[o] == gi && (int)e == ei) return pos;
-                if (pos < cnt && Matches(btn[pos], G.entries[e])) pos++;
+                while (pos < cnt && Matches(btn[pos], G.entries[e])) pos++;
             }
         }
         return pos;
@@ -258,7 +294,7 @@ static int ComputeIndex(void* wnd, void* newTg)
     // 각 그룹 아이콘 바로 오른쪽
     pos = gIcon[gi] + 1;
     for (int e = 0; e < ei; e++)
-        if (pos < cnt && Matches(btn[pos], g_groups[gi].entries[e])) pos++;
+        while (pos < cnt && Matches(btn[pos], g_groups[gi].entries[e])) pos++;
     return pos;
 }
 
@@ -268,14 +304,164 @@ static int SafeCompute(void* wnd, void* tg)
     __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
 }
 
+static void* volatile g_seenWnd[8];         // 배치 함수가 받은 CTaskListWnd (버튼 목록 찾기에 참고)
+
 static u64 __fastcall HookCreateTBGroup(u64 a, u64 b, u64 c, u64 d, u64 e, u64 f, u64 g, u64 h)
 {
+    for (int i = 0; i < 8; i++) {
+        if (g_seenWnd[i] == (void*)a) break;
+        if (!g_seenWnd[i]) { g_seenWnd[i] = (void*)a; break; }
+    }
     u64 c2 = c;
     if ((c & 0xffffffffULL) == 0x7fffffffULL) {
         int idx = SafeCompute((void*)a, (void*)b);
         if (idx >= 0) { c2 = (u64)idx; Log("삽입 위치 %d (기본: 맨 끝)", idx); }
     }
     return g_orig(a, b, c2, d, e, f, g, h);
+}
+
+// ---------- 버튼 목록 내보내기 (작업표시줄 UI 스레드에서) ----------
+static bool g_canDump;                      // GetItemFromWindow 패턴이 맞을 때만
+static UINT g_dumpMsg;
+static HHOOK g_msgHook;
+static int g_listDelta = -1;                // 창에 붙은 개체(CImpWndProc) → CTaskListWnd 시작까지의 거리
+
+// c 가 버튼 목록을 가진 CTaskListWnd 처럼 보이는지 (읽기만 해서 확인)
+static bool LooksLikeList(BYTE* c)
+{
+    void* vt = NULL;
+    if (!SafeRead(c, &vt, 8) || !InImage(vt)) return false;
+    BYTE* dpa = NULL;
+    if (!SafeRead(c + kWndDpaOffset, &dpa, 8) || !dpa || InImage(dpa)) return false;
+    int cnt = 0; BYTE** arr = NULL;
+    if (!SafeRead(dpa, &cnt, 4) || !SafeRead(dpa + 8, &arr, 8) || cnt <= 0 || cnt > 256 || !arr) return false;
+    for (int i = 0; i < cnt; i++) {
+        BYTE* bg = NULL; BYTE* tg = NULL; void** tvt = NULL; void* fn = NULL;
+        if (!SafeRead(arr + i, &bg, 8) || !bg || !SafeRead(bg + kBtnGroupTgOffset, &tg, 8) || !tg) return false;
+        if (!SafeRead(tg, &tvt, 8) || !InImage(tvt) || !SafeRead(tvt + kAppIdSlot, &fn, 8) || !InImage(fn)) return false;
+    }
+    return true;
+}
+
+static BYTE* FindListObj(HWND list)
+{
+    BYTE* u = (BYTE*)GetWindowLongPtrW(list, 0);
+    if (!u) return NULL;
+    if (g_listDelta >= 0 && LooksLikeList(u - g_listDelta)) return u - g_listDelta;
+    // 배치 함수가 받은 개체 중 이 창의 것이 있으면 그것을 쓰고, 없으면 가까운 앞쪽에서 찾는다
+    for (int i = 0; i < 8; i++) {
+        BYTE* a = (BYTE*)g_seenWnd[i];
+        if (a && a <= u && u - a < 0x400 && LooksLikeList(a)) {
+            g_listDelta = (int)(u - a);
+            Log("버튼 목록 개체: 창 개체 - 0x%x (배치 함수로 확인)", g_listDelta);
+            return a;
+        }
+    }
+    for (int d = 0; d < 0x400; d += 8) {
+        if (!LooksLikeList(u - d)) continue;
+        g_listDelta = d;
+        Log("버튼 목록 개체: 창 개체 - 0x%x (구조로 찾음)", d);
+        return u - d;
+    }
+    return NULL;
+}
+
+static std::string WToUtf8(const std::wstring& w)
+{
+    if (w.empty()) return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), NULL, 0, NULL, NULL);
+    std::string s(n, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], n, NULL, NULL);
+    return s;
+}
+
+// buttons.txt: 첫 줄 "LIST <창 핸들> <버튼 수>", 그다음 버튼마다 "<순번>|<앱 ID>|<실행 파일>|<창 핸들>,<창 핸들>..."
+static void DumpButtons(HWND list)
+{
+    std::string out;
+    char line[128];
+    BYTE* obj = FindListObj(list);
+    BYTE* dpa = NULL; int cnt = 0; BYTE** arr = NULL;
+    if (!obj || !SafeRead(obj + kWndDpaOffset, &dpa, 8) || !dpa ||
+        !SafeRead(dpa, &cnt, 4) || !SafeRead(dpa + 8, &arr, 8) || cnt <= 0 || cnt > 256 || !arr) {
+        sprintf_s(line, "FAIL %llx\n", (u64)list);
+        out = line;
+    } else {
+        sprintf_s(line, "LIST %llx %d\n", (u64)list, cnt);
+        out = line;
+        for (int i = 0; i < cnt; i++) {
+            BYTE* bg = NULL; void* tg = NULL;
+            Ident id;
+            if (!SafeRead(arr + i, &bg, 8) || !bg || !SafeRead(bg + kBtnGroupTgOffset, &tg, 8) || !tg || !IdentOf(tg, id)) {
+                sprintf_s(line, "%d|||\n", i); out += line; continue;
+            }
+            sprintf_s(line, "%d|", i);
+            out += line;
+            out += WToUtf8(id.appid) + "|" + WToUtf8(id.exe) + "|";
+            BYTE* idpa = NULL; int icnt = 0; BYTE** iarr = NULL;
+            if (SafeRead((BYTE*)tg + kTgItemsOffset, &idpa, 8) && idpa &&
+                SafeRead(idpa, &icnt, 4) && SafeRead(idpa + 8, &iarr, 8) && icnt > 0 && icnt <= 256 && iarr) {
+                for (int k = 0; k < icnt; k++) {
+                    void* item = NULL; u64 hwnd = 0;
+                    if (!SafeRead(iarr + k, &item, 8) || !item || !CallPtr(item, kItemWindowSlot, hwnd) || !hwnd) continue;
+                    sprintf_s(line, "%s%llx", out.back() == '|' ? "" : ",", hwnd);
+                    out += line;
+                }
+            }
+            out += "\n";
+        }
+    }
+    wchar_t tmp[MAX_PATH], dst[MAX_PATH];
+    wcscpy_s(tmp, g_dir); wcscat_s(tmp, L"buttons.tmp");
+    wcscpy_s(dst, g_dir); wcscat_s(dst, L"buttons.txt");
+    HANDLE w = CreateFileW(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (w == INVALID_HANDLE_VALUE) return;
+    DWORD x; WriteFile(w, out.data(), (DWORD)out.size(), &x, NULL); CloseHandle(w);
+    MoveFileExW(tmp, dst, MOVEFILE_REPLACE_EXISTING);
+}
+
+static void SafeDump(HWND list)
+{
+    __try { DumpButtons(list); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { Log("버튼 목록 내보내기 중 예외"); }
+}
+
+// 작업표시줄 UI 스레드의 메시지 훅: 우리가 보낸 메시지를 받으면 그 스레드에서 목록을 읽는다
+// (버튼 목록을 바꾸는 스레드와 같은 스레드라서 읽는 도중에 목록이 바뀌지 않는다)
+static LRESULT CALLBACK MsgHook(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION && wp == PM_REMOVE) {
+        MSG* m = (MSG*)lp;
+        if (g_dumpMsg && m->message == g_dumpMsg) {
+            SafeDump(m->hwnd);
+            m->message = WM_NULL;
+        }
+    }
+    return CallNextHookEx(g_msgHook, code, wp, lp);
+}
+
+static void ProcessButtonsRequest()
+{
+    wchar_t req[MAX_PATH];
+    wcscpy_s(req, g_dir); wcscat_s(req, L"buttons_request.txt");
+    if (GetFileAttributesW(req) == INVALID_FILE_ATTRIBUTES) return;
+    char buf[64] = { 0 }; DWORD r = 0;
+    HANDLE h = CreateFileW(req, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    ReadFile(h, buf, sizeof(buf) - 1, &r, NULL);
+    CloseHandle(h);
+    DeleteFileW(req);
+    if (!g_canDump) return;
+    HWND list = (HWND)(ULONG_PTR)_strtoui64(buf, NULL, 16);
+    wchar_t cls[64] = { 0 };
+    if (!list || !GetClassNameW(list, cls, 64) || wcscmp(cls, L"MSTaskListWClass") != 0) return;
+    DWORD pid = 0, tid = GetWindowThreadProcessId(list, &pid);
+    if (pid != GetCurrentProcessId()) return;
+    if (!g_msgHook) {
+        g_msgHook = SetWindowsHookExW(WH_GETMESSAGE, MsgHook, g_self, tid);
+        if (!g_msgHook) { Log("메시지 훅 실패 err=%u", GetLastError()); return; }
+    }
+    PostMessageW(list, g_dumpMsg, 0, 0);
 }
 
 // ---------- 작업표시줄 고정/해제 (explorer 안에서 호출) ----------
@@ -327,29 +513,35 @@ static void ProcessPinRequest()
     if (w != INVALID_HANDLE_VALUE) { DWORD x; WriteFile(w, out, n, &x, NULL); CloseHandle(w); }
 }
 
-static HMODULE g_self;
-
-// 배치할 함수 주소. 빌드가 같으면 고정 RVA, 다르면 .text 에서 패턴이 정확히 한 곳만 맞을 때 그 주소. 못 찾으면 NULL.
-static BYTE* FindCreateTBGroup(BYTE* base, IMAGE_NT_HEADERS* nt)
+// .text 에서 sig 가 맞는 곳의 수 (2 이상이면 거기서 멈춤). 한 곳이면 *found 에 그 주소.
+static int SearchText(BYTE* base, IMAGE_NT_HEADERS* nt, const BYTE* sig, size_t len, BYTE** found)
 {
-    if (nt->FileHeader.TimeDateStamp == kStamp) return base + kRvaCreateTBGroup;
+    *found = NULL;
     IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
         if (memcmp(sec->Name, ".text", 6) != 0) continue;
         BYTE* p = base + sec->VirtualAddress;
         size_t n = sec->Misc.VirtualSize;
-        BYTE* found = NULL;
         int hits = 0;
-        for (size_t k = 0; k + sizeof(kSigCreateTBGroup) <= n; k++) {
-            if (p[k] != kSigCreateTBGroup[0] || memcmp(p + k, kSigCreateTBGroup, sizeof(kSigCreateTBGroup)) != 0) continue;
-            found = p + k;
+        for (size_t k = 0; k + len <= n; k++) {
+            if (p[k] != sig[0] || memcmp(p + k, sig, len) != 0) continue;
+            *found = p + k;
             if (++hits > 1) break;
         }
-        Log("패턴 검색: %d곳 일치%s", hits, hits == 1 ? "" : " (한 곳이 아니라서 배치하지 않음)");
-        return hits == 1 ? found : NULL;
+        return hits;
     }
     Log(".text 섹션을 못 찾음");
-    return NULL;
+    return 0;
+}
+
+// 배치할 함수 주소. 빌드가 같으면 고정 RVA, 다르면 .text 에서 패턴이 정확히 한 곳만 맞을 때 그 주소. 못 찾으면 NULL.
+static BYTE* FindCreateTBGroup(BYTE* base, IMAGE_NT_HEADERS* nt)
+{
+    if (nt->FileHeader.TimeDateStamp == kStamp) return base + kRvaCreateTBGroup;
+    BYTE* found;
+    int hits = SearchText(base, nt, kSigCreateTBGroup, sizeof(kSigCreateTBGroup), &found);
+    Log("패턴 검색: %d곳 일치%s", hits, hits == 1 ? "" : " (한 곳이 아니라서 배치하지 않음)");
+    return hits == 1 ? found : NULL;
 }
 
 // 후킹을 걸고 요청을 처리하다가, 종료 요청(placer.stop)이 오면 후킹을 풀고 스스로 DLL 을 내린다.
@@ -362,12 +554,18 @@ static DWORD WINAPI Worker(LPVOID)
     BYTE* base = (BYTE*)GetModuleHandleW(NULL);
     IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
     bool hooked = false;
+    g_modBase = base;
+    g_modSize = nt->OptionalHeader.SizeOfImage;
+    BYTE* found;
+    int itemHits = SearchText(base, nt, kSigGetItemFromWindow, sizeof(kSigGetItemFromWindow), &found);
+    g_canDump = itemHits == 1;
+    g_dumpMsg = RegisterWindowMessageW(L"TaskbarGroup.DumpButtons");
+    Log("버튼 목록 내보내기 %s (창 목록 패턴 %d곳 일치)", g_canDump ? "사용" : "끔", itemHits);
     BYTE* target = FindCreateTBGroup(base, nt);
     if (!target) {
         Log("배치 함수를 찾지 못해 배치는 하지 않음 (stamp=%x size=%x)", nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
     } else {
         Log("배치 함수 rva=%x (stamp=%x)", (unsigned)(target - base), nt->FileHeader.TimeDateStamp);
-        g_modBase = base;
         MH_STATUS st = MH_Initialize();
         if (st == MH_OK) st = MH_CreateHook(target, (LPVOID)HookCreateTBGroup, (LPVOID*)&g_orig);
         if (st == MH_OK) st = MH_EnableHook(MH_ALL_HOOKS);
@@ -377,10 +575,16 @@ static DWORD WINAPI Worker(LPVOID)
 
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     while (GetFileAttributesW(stop) == INVALID_FILE_ATTRIBUTES) {
-        Sleep(200);
+        Sleep(100);
         __try { ProcessPinRequest(); } __except (EXCEPTION_EXECUTE_HANDLER) { Log("고정 요청 처리 중 예외"); }
+        __try { ProcessButtonsRequest(); } __except (EXCEPTION_EXECUTE_HANDLER) { Log("버튼 목록 요청 처리 중 예외"); }
     }
 
+    if (g_msgHook) {
+        UnhookWindowsHookEx(g_msgHook);
+        g_msgHook = NULL;
+        Sleep(200);                           // UI 스레드에서 돌던 훅 호출이 끝나길 기다림
+    }
     if (hooked) {
         MH_DisableHook(MH_ALL_HOOKS);
         Sleep(400);                           // 실행 중이던 후킹 호출이 끝나길 기다림

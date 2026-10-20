@@ -14,6 +14,8 @@ hook/placement.txt
 hook/*.stop
 hook/*.off
 hook/pin_*.txt
+hook/buttons*.txt
+hook/buttons.tmp
 # minhook 의 원래 git 정보
 _minhook_git/
 # 등록한 프로그램에서 추출한 제3자 아이콘 캐시 (재배포 조건 불명)
