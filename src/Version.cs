@@ -9,7 +9,7 @@ namespace TaskbarGroup
 {
     public static class AppVersion
     {
-        public const string Number = "2.0.18";
+        public const string Number = "2.0.19";
 
         public static string Display { get { return "v" + Number; } }
     }

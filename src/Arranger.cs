@@ -208,25 +208,31 @@ namespace TaskbarGroup
             int pos = anchor + 1;
             foreach (Entry e in entries)
             {
-                HashSet<string> names = NamesFor(e, procs);
-                int idx = -1;
-                for (int i = 0; i < buttons.Count; i++)
+                int procCount;
+                HashSet<string> names = NamesFor(e, procs, out procCount);
+                // 한 항목이 창을 여러 개 띄우면(예: 클리버스 스튜디오 + 하위 도구) 버튼이 같은 이름("Python")으로
+                // 여러 개 생기므로, 띄운 프로세스 수만큼 모두 모은다. 이름만 같은 다른 앱까지 끌고 오지 않게 그 수로 제한.
+                int limit = Math.Max(1, procCount);
+                List<int> found = new List<int>();
+                for (int i = 0; i < buttons.Count && found.Count < limit; i++)
                 {
                     TaskbarButton b = buttons[i];
                     if (claimed[i] || !b.Running) continue;
                     if (groupNames.Contains(b.BaseName)) continue;
-                    if (names.Contains(b.BaseName)) { idx = i; break; }
+                    if (names.Contains(b.BaseName)) found.Add(i);
                 }
-                if (idx < 0) continue;
-                claimed[idx] = true;
-                if (idx == pos) { pos++; continue; }
+                foreach (int i in found) claimed[i] = true;
+                foreach (int idx in found)
+                {
+                    if (idx == pos) { pos++; continue; }
 
-                // 놓을 칸보다 왼쪽에 있던 버튼을 빼면 그 뒤가 한 칸씩 당겨지므로 놓을 칸도 한 칸 앞
-                int target = idx < pos ? pos - 1 : pos;
-                if (target >= buttons.Count) target = buttons.Count - 1;
-                if (target == idx) { pos++; continue; }
-                from = idx; to = target; name = buttons[idx].Name;
-                return true;
+                    // 놓을 칸보다 왼쪽에 있던 버튼을 빼면 그 뒤가 한 칸씩 당겨지므로 놓을 칸도 한 칸 앞
+                    int target = idx < pos ? pos - 1 : pos;
+                    if (target >= buttons.Count) target = buttons.Count - 1;
+                    if (target == idx) { pos++; continue; }
+                    from = idx; to = target; name = buttons[idx].Name;
+                    return true;
+                }
             }
             return false;
         }
@@ -272,6 +278,8 @@ namespace TaskbarGroup
         /// <summary>이 프로세스가 이 항목이 띄운 것인지 (기록된 적 있음 → 실행 파일/폴더 판단 → 실행기 폴더 판단).</summary>
         private static bool Launches(Entry e, ProcessScan.EntryHint hint, RunningProcess p, bool allowLauncherFolder)
         {
+            // 예전 판단으로 잘못 기록된 것(예: VS Code 폴더 바로가기 ↔ 같은 폴더의 python 앱)도 여기서 걸러진다
+            if (!ProcessScan.ExeAllowed(hint, p.ExePath)) return false;
             string key = EntryKey(e);
             if (Knowledge.WasLaunched(key, p)) return true;
             bool hit = ProcessScan.Matches(hint, p) || (allowLauncherFolder && ProcessScan.MatchesLauncherFolder(hint, p));
@@ -283,17 +291,17 @@ namespace TaskbarGroup
 
         /// <summary>정적 후보 이름 + 이 항목이 띄운 실행 중 프로세스의 이름/창 제목
         /// (bat 로 실행한 python 앱처럼 버튼 이름이 항목과 다른 경우를 위해).</summary>
-        private static HashSet<string> NamesFor(Entry e, List<RunningProcess> procs)
+        private static HashSet<string> NamesFor(Entry e, List<RunningProcess> procs, out int procCount)
         {
             HashSet<string> set = new HashSet<string>(CandidateNames(e), StringComparer.OrdinalIgnoreCase);
             ProcessScan.EntryHint hint = HintFor(e);
-            bool any = false;
+            procCount = 0;
             foreach (RunningProcess p in procs)
-                if (Launches(e, hint, p, false)) { ProcessScan.AddButtonNames(p, set); any = true; }
-            if (!any && !hint.IsScript)
+                if (Launches(e, hint, p, false)) { ProcessScan.AddButtonNames(p, set); procCount++; }
+            if (procCount == 0 && !hint.IsScript)
             {
                 foreach (RunningProcess p in procs)
-                    if (Launches(e, hint, p, true)) ProcessScan.AddButtonNames(p, set);
+                    if (Launches(e, hint, p, true)) { ProcessScan.AddButtonNames(p, set); procCount++; }
             }
             return set;
         }

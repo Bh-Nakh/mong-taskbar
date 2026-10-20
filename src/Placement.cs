@@ -93,7 +93,8 @@ namespace TaskbarGroup
                 ProcessScan.EntryHint hint = ProcessScan.Resolve(e);
                 if (!hint.IsScript) AddKey(keys, hint.ExePath);
                 // 스크립트/실행기가 실제로 띄운 것으로 확인된 프로세스의 실행 파일
-                foreach (string exe in Knowledge.LaunchedExes(Arranger.EntryKey(e))) AddKey(keys, exe);
+                foreach (string exe in Knowledge.LaunchedExes(Arranger.EntryKey(e)))
+                    if (ProcessScan.ExeAllowed(hint, exe)) AddKey(keys, exe);
             }
             catch { }
             return keys;

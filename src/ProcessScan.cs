@@ -203,6 +203,17 @@ namespace TaskbarGroup
             /// <summary>exe 항목의 폴더. exe 가 다른 프로그램을 띄우는 실행기(예: CapCutAutomator.exe →
             /// pythonw capcut_ui.py)일 때, exe 자체가 안 떠 있으면 이 폴더에서 도는 프로세스를 대신 찾는다.</summary>
             public string ExeFolder = "";
+
+            /// <summary>인수를 붙여 실행하는 exe 바로가기(예: Code.exe --profile ... 폴더, pythonw.exe app.py).
+            /// 실제로 뜨는 것도 그 exe 이므로, 다른 exe 는 작업 폴더가 같아도 이 항목의 것이 아니다.</summary>
+            public bool ExeWithArgs { get { return IsScript && ExePath.Length > 0; } }
+        }
+
+        /// <summary>이 항목이 띄웠을 수 있는 실행 파일인지 (인수 붙은 exe 바로가기는 그 exe 만).</summary>
+        public static bool ExeAllowed(EntryHint hint, string exePath)
+        {
+            if (!hint.ExeWithArgs) return true;
+            return string.Equals(Normalize(hint.ExePath), Normalize(exePath), StringComparison.OrdinalIgnoreCase);
         }
 
         public static EntryHint Resolve(Entry e)
@@ -288,7 +299,7 @@ namespace TaskbarGroup
             if (hint.ExePath.Length > 0 && !hint.IsScript &&
                 string.Equals(Normalize(hint.ExePath), Normalize(p.ExePath), StringComparison.OrdinalIgnoreCase))
                 return true;
-            if (hint.IsScript && hint.Folder.Length > 0)
+            if (hint.IsScript && hint.Folder.Length > 0 && ExeAllowed(hint, p.ExePath))
             {
                 if (UnderFolder(p.CurrentDirectory, hint.Folder)) return true;
                 if (UnderFolder(p.ExePath, hint.Folder)) return true;
